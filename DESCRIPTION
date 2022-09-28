@@ -1,0 +1,31 @@
+Package: Dozer
+Title: Debiased Personalized Co-Expression Network Analysis
+Version: 0.0.0.9000
+Authors@R: 
+    person("Shan",, "Lu", "slu92@wisc.edu", role = c("aut", "cre"))
+Description: The package constructs debiased co-expression networks from single cell RNA-Sequencing datasets. With donor id, donor metadata, cell type or cell stage labels provided, the package can generate cell type and/or donor specific networks, extract gene centrality, gene modules, module densities and associate network properties with donor specifc information.
+License: `use_mit_license()`
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.1
+Imports:
+  igraph,
+  foreach,
+  doParallel,
+  parallel,
+  matrixStats,
+  lcmix,
+  Matrix,
+  dynamicTreeCut
+Suggests: 
+  knitr,
+  rmarkdown
+VignetteBuilder: knitr
+Depends: R (>= 4.0)
+biocViews:
+    GeneExpression,
+    scRNASeq,
+    Software,
+    SingleCell,
+    Transcriptomics,
+    Co-expression
