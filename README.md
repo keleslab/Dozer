@@ -15,7 +15,7 @@ load(system.file("extdata", "Jerber_demo.rda", package = "Dozer"))
 browseVignettes("Dozer")
 ```
 The vignette requires a list of packages for data processing and visualization. These packages have to be installed before building the vignette.
-The dependencies for vignette include ggpubr, ggplot2, cowplot, knitr, tidyr, dplyr, enrichR, limma, Seurat, igraph, cluster, foreach, doParallel. It takes up to 10 mins to build the vignettes. You can also have a quick look of the vignette, using the following link.
+The dependencies for vignette include ggpubr, ggplot2, cowplot, knitr, tidyr, dplyr, enrichR, limma, Seurat, igraph, cluster, foreach, doParallel. It takes up to 10 mins to build the vignettes. You can also have a quick look of the vignette, using the following [link](https://htmlpreview.github.io/?https://github.com/shanlu01/Dozer/blob/main/vignettes/introduction.html).
 
 ## Reference
 S. Lu and S. Keles, "Dozer: Debiased personalized gene co-expression networks for population-scale scRNA-seq data".
