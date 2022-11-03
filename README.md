@@ -5,12 +5,17 @@
 
 ```r
 ## install.packages("devtools")
-devtools::install_github("shanlu01/Dozer", build_vignettes = TRUE)
+## install dependency package
+install.packages("lcmix", repos="http://R-Forge.R-project.org")
+devtools::install_github("shanlu01/Dozer", build_vignettes = FALSE)
 ```
 As a demonstration of the analysis pipeline, we included an example dataset and a vignette in our package. The featured analyses include identifying genes showing differential centrality and gene modules having difference in connectivity between phenotypic groups.  The dataset and vignette can be access through:
 ```r
 load(system.file("extdata", "Jerber_demo.rda", package = "Dozer"))
 browseVignettes("Dozer")
 ```
+The vignette requires a list of packages for data processing and visualization. These packages have to be installed before building the vignette.
+The dependencies for vignette include ggpubr, ggplot2, cowplot, knitr, tidyr, dplyr, enrichR, limma, Seurat, igraph, cluster, foreach, doParallel. It takes up to 10 mins to build the vignettes. You can also have a quick look of the vignette, using the following link.
+
 ## Reference
 S. Lu and S. Keles, "Dozer: Debiased personalized gene co-expression networks for population-scale scRNA-seq data".
