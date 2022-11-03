@@ -5,35 +5,49 @@
 #' compute gene-gene correlation matrix.
 #' @param data A gene expression matrix, with rows representing genes and columns representing cells.
 #' @param lib_size A vector of cell sequencing depth (optional).
-#' @param covs A data frame or a list of other covariates for cells, e.g. batch labels.
+#' @param covs A data frame, whose columns are covariates for cells, e.g. batch labels.
+#' @param multicore A boolean variable indicating whether we want to parallel the computation for the normalization of each gene.
 #' @return co-expression matrix in the "network" slot and gene noise to signal ratio vector in the "ratio" slot.
 #' @export
-compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL){
-  ## shape of data
-  nr = nrow(data)
-  nc = ncol(data)
+compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE){
+  ## store gene names or id in a vector "genes"
+  genes = rownames(data)
   ## If cell sequencing depth is not provided, substitute it with total counts per cell
   if (is.null(lib_size)){
     lib_size = colSums(data)
   }
-  ## Re-scale lib_size in case it is too large of small in magnitude
+  ## Re-scale lib_size in case it is to avoid numerical instability
   lib_size = lib_size/median(lib_size)
   
-  dat_normalize = .normalize_data(data = data, lib_size = lib_size , covs = covs)
+  ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
+  dat_normalize = .normalize_data(data = data, lib_size = lib_size , covs = covs, multicore = multicore)
+  
+  ## Give higher cells weights to cells of higher sequencing depth, in the computation of gene noise ratio and weighted gene correlation.
   cell_weight = lib_size
   
-  ## Re-scale the normalized counts to avoid numerical instability when computing correlations
-  norm_data = t(apply(dat_normalize$norm_expr, 1, FUN=function(x){x/mean(x)}))
-  raw_corr = cov.wt(t(norm_data), wt = cell_weight, cor = TRUE)$cor
-  diag(raw_corr) = 0
-  
+  ## Compute gene noise ration and gene correction factor using internal function ".noise_ratio_correction"
   scaling = .noise_ratio_correction(dat_normalize$norm_expr, dat_normalize$expr_var, cell_weight)
-  network = sweep(raw_corr, MARGIN=2, scaling$correction_factor, `*`)
-  network = sweep(network, MARGIN=1, scaling$correction_factor, `*`)
-  rownames(network) = rownames(data)
-  colnames(network) = rownames(data)
+  
+  ## Re-scale the normalized counts to avoid numerical instability when computing correlations
+  dat_normalize$norm_expr = t(apply(dat_normalize$norm_expr, 1, FUN=function(x){x/mean(x)}))
+  ## Compute weighted gene correlations.
+  network = cov.wt(t(dat_normalize$norm_expr), wt = cell_weight, cor = TRUE)$cor
+  
+  ## Apply gene correction factors 
+  network = sweep(network, MARGIN = 2, scaling$correction_factor, `*`)
+  network = sweep(network, MARGIN = 1, scaling$correction_factor, `*`)
+  ## Label each row and column of gene correlation matrix with gene id.
+  rownames(network) = genes
+  colnames(network) = genes
+  
+  ## Set the correlation of a gene to itself to be 1
+  diag(network) = 1
+  ## Threshold all corrected correlation larger than 1 to be the largest correlation value which is smaller than 1
+  network[network > 1] = max(network[network < 1])
+  ## Label gene noise ratio with gene id.
   ratio = data.frame(ratio = scaling$noise_ratio)
-  rownames(ratio) = rownames(data)
+  rownames(ratio) = genes
+  ## Return gene co-expression matrix and gene noise ratio.
   return(list(network = network, ratio = ratio))
 }
 
@@ -44,16 +58,17 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL){
 #' @return list of gene centrality vectors, including degree, pagerank, betweenness and eigenvector centrality.
 #' @export
 compute_centrality <- function(network, threshold = 0.99){
+  ## Set the diagonal of gene correlation matrix as 0, because we do not want network edges of genes to themselves.
   diag(network) = 0
+  ## Take the absolute value of correlations to build an un-signed network.
   network = abs(network)
-  network[network < quantile(network[upper.tri(network)], threshold)]=0
+  ## Correlation on the quantile threshold.
+  quant_value = quantile(network[upper.tri(network)], threshold)
+  ## Set the gene pairs with correlation smaller than quant_value as 0 and 1 otherwise.
+  network[network < quant_value] = 0
   network[network > 0] = 1
-  node = nrow(network)
-  pagerank = rep(0, node)
-  degree = rep(0, node)
-  betweenness = rep(0, node)
-  ev = rep(0, node)
   
+  ## Transform adjacency matrix into igraph (dependent package) format and then compute gene centrality using igraph functions.
   igraph_net = igraph::graph_from_adjacency_matrix(network, mode =  "undirected")
   pagerank =  igraph::page_rank(igraph_net)$vector
   betweenness = igraph::betweenness(igraph_net, directed = F)
@@ -74,15 +89,21 @@ compute_centrality <- function(network, threshold = 0.99){
 #' @param ncell Number of cells to be simulated.
 #' @return simulated gene expression matrix using Gamma Poisson distribution.
 #' @export
-simulate_counts<- function(corr, shape, scale, mlog, sdlog, ncell){
+simulate_counts <- function(corr, shape, scale, mlog, sdlog, ncell){
+  ## The number of genes matches the dimension of correlation matrix "corr".
   ngene = nrow(corr)
+  ## Simulate a matrix of ngene * ncell from multivariate Gamma distribution with shape = shape and rate = 1, and correlation corr.
   G = t(lcmix::rmvgamma(ncell, shape = shape, rate = 1, corr = corr))
+  ## Multiply scale parameter of each row of matrix G, by the scaling property of Gamma, the Gamma scale parameter will equal to variable scale. 
+  G = sweep(G, MARGIN = 1, scale, `*`)
+  ## Simulate library size from a log normal distribution with parameter mlog and sdlog and multiply it to columns of G.
   lib0 = rlnorm(ncell, meanlog = mlog, sdlog = sdlog) 
-  nij=(matrix(scale, nrow=ngene, ncol=1)%*% matrix(lib0, nrow = 1))
-  X=G*nij
-  data = matrix(rpois(ngene* ncell, lambda = as.vector(X)), nrow=ngene)
-  rownames(data)= paste0('gene', 1:ngene)
-  colnames(data)=paste0('cell', 1:ncell)
+  G = sweep(G, MARGIN = 2, lib0, `*`)
+  ## Simulate the final Gamma-Poisson counts using the multivariate gamma G as Poisson rate.
+  data = matrix(rpois(ngene* ncell, lambda = as.vector(G)), nrow = ngene)
+  ## Give names to the row and columns of simulated counts and return.
+  rownames(data) = paste0('gene', 1:ngene)
+  colnames(data) = paste0('cell', 1:ncell)
   return(data)
 }
 
@@ -93,18 +114,22 @@ simulate_counts<- function(corr, shape, scale, mlog, sdlog, ncell){
 #' @return cluster labels
 #' @export
 clustering_difference_network<-function(network1, network2, minClusterSize = 20){
+  ## Compute the difference of the two adjacency matrices.
   diff_network = network1 - network2
-  # compute inner product of difference network to itself, 
-  # so that genes with similar connectivity patterns in the difference network
-  # have high score in the transformed adjacency matrix
+  ## compute inner product of difference network to itself, 
+  ## so that genes with similar connectivity patterns in the difference network
+  ## have high score in the transformed adjacency matrix
   diff_network = diff_network%*%t(diff_network)
   
-  non_singleton = rowMeans(abs(diff_network))>=0
+  ## separate the genes with edges in diff_network (non_singleton) and genes without edges in diff_network (singleton).
+  non_singleton = rowSums(abs(diff_network)) >= 0
   sub_net = diff_network[non_singleton, non_singleton]
-  ## convert to a nonnegative distance matrix
+  ## Convert the adjacency matrix of all non_singletons to a nonnegative distance matrix.
   distance = max(sub_net) - sub_net
+  ## Conduct hierarchical clustering and dynamic Tree Cut on the non_singleton sub-network.
   cluster_non_singleton = dynamicTreeCut::cutreeDynamic(dendro = stats::hclust(stats::as.dist(distance)), 
-                                      distM = distance, minClusterSize = minClusterSize)
+                                                        distM = distance, minClusterSize = minClusterSize)
+  ## Combine cluster labels for singleton and nonsingletons, labels genes by their id provided in network1.
   final_cluster = rep('singleton', nrow(network1))
   final_cluster[non_singleton] = cluster_non_singleton
   names(final_cluster) = rownames(network1)
@@ -114,59 +139,103 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
 
 
 ## internal functions ##
-.normalize_data <- function(data, lib_size, covs = NULL){
+.normalize_data <- function(data, lib_size, covs = NULL, multicore){
   # a function that uses poisson regression to normalize count matrix of scRNA-seq data 
-  # input: data (count matrix), lib_size (a vector of cell sequencing depth), covs (other sources of variation to be adjusted)
+  # input: data (count matrix, gene by cell), lib_size (a vector of cell sequencing depth), covs (other sources of variation to be adjusted)
   # output a list containing norm_expr (normalized matrix) and expr_var (variance of the normalized count)
-  ngene = nrow(data)
+  
+  ## shape of data is # genes by # cells.
   ncell = ncol(data)
-  norm_expr = matrix(0, nrow = ngene, ncol = ncell)
-  expr_var = matrix(0, nrow = ngene, ncol = ncell)
+  ngene = nrow(data)
   
-  cores = parallel::detectCores()
-  cl <- parallel::makeCluster(cores[1]-1) 
-  doParallel::registerDoParallel(cl)
-  `%dopar%` <- foreach::`%dopar%`
-  res = foreach::foreach(i = 1:ngene, .combine = 'rbind')%dopar%{
-    if (length(covs)==0){
-      obs = data.frame(y = data[i,], n = lib_size)
-    }else{
-      obs = data.frame(y = data[i,], n = lib_size, covs)
-    }
-    
-    fit1 = glm(y  ~ .-n, offset=(log(n)),
-               family=poisson(link = log), data = obs)
-    res_var = obs$y/(obs$n)^2
-    res = resid(fit1, type = "response")/obs$n
-    c(res, res_var)
+  ## remove covariates with identical values for all cells
+  if (!is.null(covs)){
+    covs = covs[, apply(covs, 2, FUN=function(i){length(unique(i))})!=1]
   }
-  parallel::stopCluster(cl)
-  return(list(norm_expr = res[,1:ncell], expr_var = res[,(ncell+1):(ncell*2)]))
-  
+  ## The number of covariate is zero, scale raw counts by cell lib_size, otherwise run a Poisson regression to determine cell specific size factor
+  if (length(covs)==0){
+    ## When the number of covariate is zero, scale raw counts by cell lib_size, 
+    ## the variance of the normalized count is count/lib_size^2.
+    norm_expr = sweep(data, MARGIN = 2, 1/lib_size, `*`)
+    expr_var = sweep(data, MARGIN = 2, 1/lib_size^2, `*`)
+    return(list(norm_expr = norm_expr, expr_var = expr_var))
+  }else if (!multicore){
+    ## If there are covariates and we decide not to parallelize the computation for each gene,
+    ## we run a Poisson regression for each gene in a loop and compute the response prediction as cell size factor for normalization.
+    norm_expr = matrix(0, nrow = ngene, ncol = ncell)
+    expr_var = matrix(0, nrow = ngene, ncol = ncell)
+    for(i in 1:ngene){
+      obs = data.frame(y = data[i,], n = lib_size, covs)
+      fit1 = stats::glm(y  ~ .-n, offset=(log(n)),
+                        family=poisson(link = log), data = obs)
+      lhat = stats::predict(fit1, type='response')
+      expr_var[i,] = obs$y/lhat^2
+      norm_expr[i,] = obs$y/lhat
+    } 
+    return(list(norm_expr = norm_expr, expr_var = expr_var))
+  }else{
+    ## The same computation as the previous block with parallelization for each gene.
+    cores = parallel::detectCores()
+    cl <- parallel::makeCluster(cores[1]-1) 
+    doParallel::registerDoParallel(cl)
+    `%dopar%` <- foreach::`%dopar%`
+    res = foreach::foreach(i = 1:ngene, .combine = 'rbind')%dopar%{
+      obs = data.frame(y = data[i,], n = lib_size, covs)
+      fit1 = stats::glm(y  ~ .-n, offset=(log(n)),
+                 family=poisson(link = log), data = obs)
+      lhat = stats::predict(fit1, type='response')
+      norm_expr_i = obs$y/lhat
+      expr_var_i = obs$y/lhat^2
+      c(norm_expr_i, expr_var_i)
+    }
+    parallel::stopCluster(cl)
+    return(list(norm_expr = res[,1:ncell], expr_var = res[,(ncell+1):(ncell*2)]))
+  }
 }
 
 
 .noise_ratio_correction <- function(norm_expr, expr_var, cell_weight){
-  # a function that computes correction factor for each gene
-  # input: norm_expr (normalized matrix), expr_var (variance of the normalized count), cell_weight
-  # output: gene noise ratio and correction factor
+  # A function that computes noise ration and correction factor for each gene.
+  # Input: norm_expr (normalized matrix), expr_var (variance of the normalized count), cell_weight.
+  # Output: gene noise ratio and correction factor.
+  
+  ## Shape of norm_expr is number of genes by number of cells.
   ncell = ncol(norm_expr)
-  l = apply(norm_expr, 1, FUN=function(x){matrixStats::weightedVar(x, cell_weight)})
-  e = apply(expr_var, 1, FUN=function(x){weighted.mean(x, cell_weight)}) 
-  x1 = t(apply(norm_expr, 1, FUN=function(x){cell_weight*(x - weighted.mean(x, cell_weight))^2}))
-  x2 = t(apply(expr_var, 1, FUN=function(x){cell_weight*x}))
-  a = matrixStats::rowVars(x1)/ncell
-  b = matrixStats::rowVars(x2)/ncell
+  ngene = nrow(norm_expr)
   
-  v = pmax(0,(a*e^2+b*l^2)/(l-e)^4)
-  y = pmax(1,l/(l-e)/(1+v))    
-  x = e/l
-  z = loess(y~x, span = 0.1, degree = 1)
-  m = max(z$fitted)
-  y[x >= 1-1/m] = m
-  y[x<1-1/m] = 1/(1-x[x<1-1/m])
+  ## Dividend and divisor of supplement equation (7).
+  mu_w = apply(expr_var, 1, FUN=function(x){weighted.mean(x, cell_weight)}) 
+  s2_w = apply(norm_expr, 1, FUN=function(x){matrixStats::weightedVar(x, cell_weight)})
+  ## Noise ratio.
+  noise_ratio = mu_w/s2_w
+  ## Because the dividend and divisor are  all estimators (with noise), the ratio can be slightly larger than 1.
+  ## If noise ratio is larger than 1, the plug-in estimator for gene correction will be negative (supplement equation (10)).
+  ## So we remove the genes with noise ratio greater than 1 in the smoothing procedure.
+  noise_ratio_less_1 = (mu_w < s2_w)
   
-  return(list(noise_ratio = e/l, correction_factor = sqrt(y)))
+  ## Estimate variance of the estimator \sqrt{\hat{S}_j}, supplement equation (11)
+  s2_w2 = t(apply(norm_expr, 1, FUN=function(x){cell_weight*(x - weighted.mean(x, cell_weight))^2}))
+  mu_w2 = t(apply(expr_var, 1, FUN=function(x){cell_weight*x}))
+  var_s2_w = matrixStats::rowVars(s2_w2)/ncell
+  var_mu_w = matrixStats::rowVars(mu_w2)/ncell
+  var_s = (var_s2_w*mu_w^2+var_mu_w*s2_w^2)/(s2_w-mu_w)^4
+  #var_root_s = (s2_w*var_mu_w + var_s2_w*mu_w^2/s2_w)/4/(s2_w-mu_w)^3 
+  
+  ## Shrinkage estimator S_j^0 = 1 v (\hat{S}_j)/(1+var(\hat{S}_j)) supplement equation (12) 
+  S_shrinkage = pmax(1, 1/(1-noise_ratio[noise_ratio_less_1])/(1 + var_s[noise_ratio_less_1]))    
+  
+  ## LOESS smoothing for s_shrinkage
+  S_smooth = loess(S_shrinkage ~ noise_ratio[noise_ratio_less_1], span = 0.1, degree = 1)
+  ## Find the turning point of the uni-modal smoothing curve and truncate the correction factor at the turning point. (supplement equation (13))
+  turn_val = max(S_smooth$fitted)
+  turn_arg =  S_smooth$x[which.max(S_smooth$fitted)]#1-1/turn_val
+  
+  final_S = predict(S_smooth, noise_ratio) #pmin(turn_val, 1/(1-noise_ratio))
+  final_S[noise_ratio >= turn_arg] = turn_val
+  
+  
+  ## we are using sqrt(final_S) as the correction_factor here, but we refer to final_S as the correction factor in the paper.
+  return(list(noise_ratio = noise_ratio, correction_factor = sqrt(final_S)))
 }
 
 

@@ -64,31 +64,29 @@ data.frame(obj@reductions$tsne@cell.embeddings) %>%
 
 # 2 Compute gene-gene correlation matrix and gene-specific noise ratio.
 
-```{r, fig.hold='hold', fig.width=8, fig.height=4}
+```{r, fig.hold='hold', fig.width=8, fig.height=4, message=F, warning=F,  results='hide'}
 
-path = '~/Downloads/temp_folder/'
-if (!file.exists(path)){
+path = paste0(tempdir(), '/dozer_tmp')
+if (! file.exists(path)){
   dir.create(path)
-  for(i in 1:nrow(donor_info)) {
-      donor = donor_info$donor_id[i]
-      data = matrix(counts[ ,metadata$donor_id==donor], nrow=nrow(counts))
-      meta = metadata[metadata$donor_id == donor, ]
-      ## Compute a weighted total counts per cell as an approximation for sequencing depth, 
-      ## where we down weight genes with higher expression by dividing the expression by its mean.
-      weighted_total_counts_per_cell = rowMeans(apply(data, 1, FUN=function(x){if (sum(x)>1){x=x/mean(x)}; return(x)}))
-      
-      ## If there are several sample_id presented in the dataset, regress it out.
-      if (length(unique(meta$sample_id))>1){
-          res = compute_gene_correlation(data, covs = data.frame(cov1 = as.factor(meta$sample_id)), 
-                                         lib_size = weighted_total_counts_per_cell)
-      }else{
-          res = compute_gene_correlation(data, lib_size = weighted_total_counts_per_cell)
-      }
-      ## Saver co-expression matrices to file
-      save(res, file = paste0(path, donor, '-coexpr.rda'))
-  }
 }
-
+cl <- makeCluster(detectCores()) 
+registerDoParallel(cl)
+## Load noise ratio into a "gene by donor" matrix.
+foreach (i = 1:nrow(donor_info), .packages = c('Matrix')) %dopar%{
+    donor = donor_info$donor_id[i]
+    data = matrix(counts[ , metadata$donor_id == donor], nrow = nrow(counts))
+    meta = metadata[metadata$donor_id == donor, ]
+    ## Compute a weighted total counts per cell as an approximation for sequencing depth, 
+    ## where we down weight genes with higher expression by dividing the expression by its mean.
+    weighted_total_counts_per_cell = rowMeans(apply(data, 1, FUN=function(x){if   (mean(x)>1){x=x/mean(x)}; return(x)}))
+    ## If there are several sample_index presented in the dataset, regress it out.
+    res = Dozer::compute_gene_correlation(data,  lib_size = weighted_total_counts_per_cell, 
+                                   covs = data.frame(var1 = as.factor(meta$sample_id)))
+    ## Saver co-expression matrices to file
+    save(res, file = paste0(path, donor, '-coexpr.rda'))
+}
+stopCluster(cl)
 ```
 
 ## 2.1 Filter genes by their noise ratio.
@@ -105,6 +103,8 @@ noise_ratio_alldonor = foreach(i = 1:nrow(donor_info), .combine = 'cbind') %dopa
 ## Keep genes whose average noise ratio smaller than 0.9.
 keep_gene = rowMeans(noise_ratio_alldonor) < .9
 gene_name = rownames(counts)[keep_gene]
+## The number of genes passed filtering with noise ratio.
+sum(keep_gene)
 ```
 
 # 3 Gene centrality analysis
@@ -129,7 +129,7 @@ eigenvector = centrality[, seq(4, ncol(centrality), 4)]
 compute_tsne <- function(dat){
   obj<-CreateSeuratObject(dat)
   obj<-NormalizeData(obj, verbose = F)
-  obj<-FindVariableFeatures(obj, nfeatures = 1000, verbose = F)
+  obj<-FindVariableFeatures(obj, nfeatures = 2000, verbose = F)
   obj<-ScaleData(obj, do.scale = F, verbose = F)
   obj<-RunPCA(obj, verbose = F)
   obj<-RunTSNE(obj, check_duplicates = F, perplexity = 10, verbose = F)
@@ -271,7 +271,7 @@ for(i in 1:nrow(donor_info)){
   }
 }
 ## Conduct hierarchical clustering on the difference of the two average networks.
-clust = clustering_difference_network(network_success, network_failure)
+clust = clustering_difference_network(network_success, network_failure, minClusterSize = 30)
 category = sort(unique(clust))
 density  = data.frame(matrix(0, nrow=nrow(donor_info), ncol = length(category)))
 colnames(density) = paste0('Cluster_', category)
@@ -293,7 +293,7 @@ gather(cbind(donor_info, density),key = 'cluster', value = 'module_density',
 
 ## 4.2 Gene set enrichment for modules from difference network.
 
-```{r, fig.width=10, fig.height=4}
+```{r, fig.width=10, fig.height=8}
 term.list = list()
 for (i in 1:length(category)){
   enriched <- enrichr(databases = dbs, genes = names(clust)[clust==category[i]])[[1]]
@@ -303,14 +303,29 @@ for (i in 1:length(category)){
   }
 }
 
-bind_rows(term.list, .id = "column_label") %>%  
-   mutate( overlap_gene_count = unlist(lapply(Overlap, FUN=function(x){as.integer(strsplit(x, '/')[[1]][1])}))) %>% 
+df.kegg <- bind_rows(term.list, .id = "column_label") 
+terms = df.kegg$Term[!duplicated(df.kegg$Term)]
+term_gene = lapply(terms, FUN=function(x){unique(unlist(lapply(df.kegg$Genes[df.kegg$Term==x], FUN=function(y){strsplit(y, ';')[[1]]})))})
+nterm = length(term_gene)
+similarity_mat = matrix(1, nrow=nterm, ncol = nterm)
+for(i in 1:(nterm-1)){
+  for (j in (i+1):nterm){
+    similarity_mat[i, j] = length(intersect(term_gene[[i]], term_gene[[j]]))/length(unique(c(term_gene[[i]], term_gene[[j]])))
+    similarity_mat[j, i] = similarity_mat[i,j]
+  }
+}
+orders =terms[hclust(as.dist(1-similarity_mat))$order]
+df.kegg %>%  
+   mutate( overlap_gene_count = unlist(lapply(Overlap, FUN=function(x){as.integer(strsplit(x, '/')[[1]][1])})), Term = factor(Term, levels = orders)) %>% 
    ggplot(aes(Term, -log10(Adjusted.P.value), fill = overlap_gene_count))+geom_bar(stat = 'identity')+
-  scale_fill_gradient(low='blue', high = 'red')+coord_flip()+labs(fill = 'Overlapping gene counts')+
+  scale_fill_gradient(low='blue', high = 'red', trans='log10')+coord_flip()+labs(fill = 'Overlapping gene counts')+
   ylab('-log10 adjusted p value') +facet_grid(~cluster, scales='free')+theme(legend.position = 'top')
   
 ```
-
+```{r}
+# delete the folder storing co-expression matrices
+#unlink(path, recursive = TRUE)
+```
 
 ```{r}
 sessionInfo()

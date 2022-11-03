@@ -14,18 +14,17 @@ Imports:
   doParallel,
   parallel,
   matrixStats,
-  lcmix,
   Matrix,
   dynamicTreeCut
 Suggests: 
   knitr,
-  rmarkdown
+  rmarkdown,
+  lcmix
 VignetteBuilder: knitr
 Depends: R (>= 4.0)
 biocViews:
     GeneExpression,
-    scRNASeq,
     Software,
-    SingleCell,
-    Transcriptomics,
-    Co-expression
+    Co-expression, 
+    Population scale scRNA-seq,  
+    Poisson measurement model
