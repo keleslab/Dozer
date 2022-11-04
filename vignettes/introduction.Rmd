@@ -18,20 +18,20 @@ knitr::opts_chunk$set(
 ```{r setup}
 suppressPackageStartupMessages({
   library(Dozer)
-  library(ggpubr)
-  library(enrichR)
+  library(Matrix)
   library(ggplot2)
-  library(cowplot)
-  library(knitr)
-  library(tidyr)
+  library(ggrepel)
+  library(ggpubr)
   library(dplyr)
+  library(knitr)
   library(foreach)
   library(doParallel)
-  library(igraph)
-  library(Seurat)
   library(cluster)
   library(limma)
+  library(enrichR)
+  library(Rtsne)
 })
+
 load(system.file("extdata", "Jerber_demo.rda", package = "Dozer"))
 theme_set(theme_pubr(base_size = 12))
 ```
@@ -46,19 +46,12 @@ theme_set(theme_pubr(base_size = 12))
 
 ```{r, fig.hold='hold', fig.width=6, fig.height=4, message=F, warning=F}
 ## Barplot for the differentiation efficiency among donors.
-donor_info %>% filter(complete.cases(donor_info) ) %>% ggplot(aes(diff_efficiency, fill = phenotype))+
+ggplot(donor_info, aes(diff_efficiency, fill = phenotype))+
   geom_histogram()+labs(fill = 'Phenotype')+
   xlab('Differentiation efficiency')+ylab('Number of donors')
 
-obj <- CreateSeuratObject(counts, meta.data = metadata)
-obj <- SCTransform(obj, verbose = F, variable.features.n = nrow(counts), 
-                           return.only.var.genes = F,  vars.to.regress = c('pool_id'))
-obj <- RunPCA(obj)
-obj <- RunTSNE(obj)
-
 ## Visualize all cells in a scatter plot with color labels for donors.
-data.frame(obj@reductions$tsne@cell.embeddings) %>% 
-  ggplot(aes(tSNE_1, tSNE_2, color = metadata$phenotype))+geom_point()+
+ggplot(metadata, aes(tSNE_1, tSNE_2, color = phenotype))+geom_point()+
   ggtitle('Scatter plot of cells')+theme(legend.position ='right')+labs(color = 'Phenotype')
 ```
 
@@ -73,7 +66,7 @@ if (! file.exists(path)){
 cl <- makeCluster(detectCores()) 
 registerDoParallel(cl)
 ## Load noise ratio into a "gene by donor" matrix.
-foreach (i = 1:nrow(donor_info), .packages = c('Matrix')) %dopar%{
+noise_ratio_gene_by_donor = foreach (i = 1:nrow(donor_info), .packages = c('Matrix'), .combine = 'cbind') %dopar%{
     donor = donor_info$donor_id[i]
     data = matrix(counts[ , metadata$donor_id == donor], nrow = nrow(counts))
     meta = metadata[metadata$donor_id == donor, ]
@@ -85,6 +78,7 @@ foreach (i = 1:nrow(donor_info), .packages = c('Matrix')) %dopar%{
                                    covs = data.frame(var1 = as.factor(meta$sample_id)))
     ## Saver co-expression matrices to file
     save(res, file = paste0(path, donor, '-coexpr.rda'))
+    res$ratio
 }
 stopCluster(cl)
 ```
@@ -92,16 +86,9 @@ stopCluster(cl)
 ## 2.1 Filter genes by their noise ratio.
 
 ```{r, fig.hold='hold', fig.width=8, fig.height=4, message=F, warning=F}
-cl <- makeCluster(detectCores()) 
-registerDoParallel(cl)
-## Load noise ratio into a "gene by donor" matrix.
-noise_ratio_alldonor = foreach(i = 1:nrow(donor_info), .combine = 'cbind') %dopar% {
-  donor = donor_info$donor_id[i]
-  load(paste0(path, donor, '-coexpr.rda'))
-  res$ratio
-}
+
 ## Keep genes whose average noise ratio smaller than 0.9.
-keep_gene = rowMeans(noise_ratio_alldonor) < .9
+keep_gene = rowMeans(noise_ratio_gene_by_donor) < .9
 gene_name = rownames(counts)[keep_gene]
 ## The number of genes passed filtering with noise ratio.
 sum(keep_gene)
@@ -113,11 +100,14 @@ sum(keep_gene)
 
 ```{r, fig.hold='hold', fig.width=8, fig.height=3, message=F, warning=F}
 ## Compute gene centrality.
+cl <- makeCluster(detectCores()) 
+registerDoParallel(cl)
 centrality = foreach(i = 1:nrow(donor_info), .combine = 'c', .multicombine = T) %dopar% {
   donor = donor_info$donor_id[i]
   load(paste0(path, donor, '-coexpr.rda'))
   Dozer::compute_centrality(res$network[keep_gene, keep_gene], threshold = .95)
 }
+stopCluster(cl)
 ## Since centrality is computed in parallel and combined into a single matrix, we separate each centrality mode into its own matrix.
 centrality = data.frame(centrality, row.names = gene_name)
 degree = centrality[, seq(1, ncol(centrality), 4)]
@@ -126,15 +116,11 @@ betweenness = centrality[, seq(3, ncol(centrality), 4)]
 eigenvector = centrality[, seq(4, ncol(centrality), 4)]
 
 ## A function conducting tSNE dimension reduction for centrality matrices.
+set.seed(1)
 compute_tsne <- function(dat){
-  obj<-CreateSeuratObject(dat)
-  obj<-NormalizeData(obj, verbose = F)
-  obj<-FindVariableFeatures(obj, nfeatures = 2000, verbose = F)
-  obj<-ScaleData(obj, do.scale = F, verbose = F)
-  obj<-RunPCA(obj, verbose = F)
-  obj<-RunTSNE(obj, check_duplicates = F, perplexity = 10, verbose = F)
-  tsne = obj@reductions$tsne@cell.embeddings
-  return(apply(tsne, 2, FUN=function(i){i/max(abs(i))}))
+  pr <- prcomp(log(1+apply(dat,2,rank)), scale = T, center = T)
+  tsne = Rtsne::Rtsne(pr$rotation[, 1:5], perplexity = 15)
+  return(apply(data.frame(tsne$Y), 2, FUN=function(i){i/max(abs(i))}))
 }
 
 ## Compute tSNE reduction for each centrality mode.
@@ -144,9 +130,8 @@ df.tsne = rbind(data.frame(compute_tsne(degree), donor_info, method = 'Dozer', c
                data.frame(compute_tsne(eigenvector), donor_info, method = 'Dozer', centrality = 'eigenvector'))
 
 ## Plot tSNE coordinates of gene centrality with color labels for differentiation efficiency group.
-df.tsne %>% 
-  ggplot(aes(tSNE_1, tSNE_2, color = phenotype )) + geom_point(size=3) + facet_grid(~ centrality) +
-  labs(color = 'Phenotype')
+ggplot(df.tsne, aes(X1, X2, color = phenotype)) + geom_point(size = 3) + facet_grid( ~ centrality) +
+  labs(color = 'Phenotype') + xlab('tSNE_1') + ylab('tSNE_2')
 
 ## Compute silhouette score for the separation of gene centrality between the two differentiation efficiency group.
 
@@ -161,12 +146,11 @@ df.tsne %>% group_by(centrality) %>%
 ## 3.2 Compute differential centrality genes from Dozer co-expression network and display on a volcano plot.
 
 ```{r, fig.width=8, fig.height=4}
-
 centrality_label = colnames(centrality)[1:4]
 DC.list = list()
 for (j in 1:4){
   df.centrality = centrality[, seq(j, ncol(centrality), 4)]
-  group = donor_info[complete.cases(donor_info), 'phenotype']
+  group = donor_info[, 'phenotype']
   design2 <- model.matrix( ~ group - 1)
   colnames(design2) <- c("Success", "Failure")
   fit2 <- lmFit(df.centrality, design2)
@@ -174,11 +158,11 @@ for (j in 1:4){
   fit2C <- contrasts.fit(fit2, contrast.matrix)
   fit2C <- eBayes(fit2C)
   tab = topTable(fit2C, number = nrow(df.centrality))[gene_name,]
-  DC.list[[j]] =  data.frame(tab, centrality = centrality_label[j])
+  DC.list[[j]] = data.frame(tab, centrality = centrality_label[j])
 }
 DC_test = bind_rows(DC.list, .id = "column_label") 
 DC_test$Significant = DC_test$adj.P.Val<.05
-DC_test %>%ggplot(aes(logFC, -log10(adj.P.Val), color = Significant))+geom_point()+
+DC_test %>% ggplot(aes(logFC, -log10(adj.P.Val), color = Significant))+geom_point()+
   facet_wrap(~centrality, scales = 'free')+ylab('-log10 adjusted p value')+scale_color_manual(values = c('grey50', 'red')) + ggtitle(' Differential centrality genes between success and failure in neuronal differentiation')
 
 
@@ -229,7 +213,7 @@ rownames(scatter.plot.df) = rownames(DC_test %>% filter(centrality==mode))
 scatter.plot.df %>% 
   ggplot(aes(expression, centrality, color = signif_group))+geom_point()+
   scale_x_log10()+scale_y_log10()+
-  ggrepel:: geom_text_repel(
+    geom_text_repel(
     data = scatter.plot.df[labels,],
     aes(label = labels),
     fontface='bold',
@@ -246,7 +230,7 @@ theme(legend.position='top')+  guides(color = guide_legend(nrow = 2, byrow = TRU
 
 ## 4.1 Detect modules in the "differene network" between Success and Failure group.
 
-```{r, fig.width=8, fig.height=8}
+```{r, fig.width=8, fig.height=8, message=FALSE, warning=FALSE}
 ## Compute average networks in each donor group
 ngene = sum(keep_gene)
 n_success = sum(donor_info$phenotype=='Success')
@@ -276,16 +260,20 @@ category = sort(unique(clust))
 density  = data.frame(matrix(0, nrow=nrow(donor_info), ncol = length(category)))
 colnames(density) = paste0('Cluster_', category)
 ## Compute module density of in each donor specific network and test if there is significant difference in module densities between groups.
+df.density = list()
+row.names(donor_info) = NULL
 for(i in 1:nrow(donor_info)){
   donor = donor_info$donor_id[i]
   load(paste0(path, donor, '-coexpr.rda'))
   network_i = abs(res$network[keep_gene, keep_gene])
-  density[i,] = unlist(lapply(category, FUN=function(x){mean(network_i[clust==x, clust==x])}))
+  df.density[[i]] =
+       bind_rows(lapply(category, FUN=function(x){
+         data.frame(donor_info[i, ], cluster = paste0('Cluster ', x), 
+                    module_density = mean(network_i[clust==x, clust==x]))}))
 }
 
 ## Visualize module densities.
-gather(cbind(donor_info, density),key = 'cluster', value = 'module_density',
-      colnames(density)[1]:colnames(density)[ncol(density)], factor_key = T) %>%
+df.density %>% bind_rows() %>%
   ggplot(aes(phenotype, module_density, color = phenotype))+geom_boxplot(width=.3)+
     stat_compare_means()+facet_wrap(cluster~., nrow=2) + labs(color = 'Phenotype')
 
@@ -324,7 +312,7 @@ df.kegg %>%
 ```
 ```{r}
 # delete the folder storing co-expression matrices
-#unlink(path, recursive = TRUE)
+unlink(path, recursive = TRUE)
 ```
 
 ```{r}
