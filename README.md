@@ -11,7 +11,7 @@ devtools::install_github("shanlu01/Dozer", build_vignettes = FALSE)
 As a demonstration of the analysis pipeline, we included an example dataset and a vignette in our package. The featured analyses include identifying genes showing differential centrality and gene modules having difference in connectivity between phenotypic groups.
 
 The vignette requires a list of packages for data processing and visualization. These packages have to be installed before building the vignette.
-The dependencies for vignette include ggpubr, ggplot2, cowplot, knitr, tidyr, dplyr, enrichR, limma, Seurat, igraph, cluster, foreach, doParallel. It takes up to 10 mins to build the vignette. The dataset and vignette can be access through
+The dependencies for vignette include ggpubr, ggplot2, ggrepel, Rtsne, Matrix, knitr, dplyr, enrichR, limma, cluster, foreach, doParallel. It takes up to 10 mins to build the vignette. The dataset and vignette can be access through
 ```r
 load(system.file("extdata", "Jerber_demo.rda", package = "Dozer"))
 browseVignettes("Dozer")
