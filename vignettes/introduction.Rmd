@@ -116,11 +116,13 @@ betweenness = centrality[, seq(3, ncol(centrality), 4)]
 eigenvector = centrality[, seq(4, ncol(centrality), 4)]
 
 ## A function conducting tSNE dimension reduction for centrality matrices.
-set.seed(1)
 compute_tsne <- function(dat){
+  set.seed(1)
   pr <- prcomp(log(1+apply(dat,2,rank)), scale = T, center = T)
-  tsne = Rtsne::Rtsne(pr$rotation[, 1:5], perplexity = 15)
-  return(apply(data.frame(tsne$Y), 2, FUN=function(i){i/max(abs(i))}))
+  tsne = Rtsne::Rtsne(pr$rotation[, 1:4], perplexity = 15)
+  res = data.frame(pr$rotation[, 1:5], tsne$Y)
+  colnames(res) = paste0('X', 1:ncol(res))
+  return(res)
 }
 
 ## Compute tSNE reduction for each centrality mode.
@@ -130,7 +132,7 @@ df.tsne = rbind(data.frame(compute_tsne(degree), donor_info, method = 'Dozer', c
                data.frame(compute_tsne(eigenvector), donor_info, method = 'Dozer', centrality = 'eigenvector'))
 
 ## Plot tSNE coordinates of gene centrality with color labels for differentiation efficiency group.
-ggplot(df.tsne, aes(X1, X2, color = phenotype)) + geom_point(size = 3) + facet_grid( ~ centrality) +
+ggplot(df.tsne, aes(X6, X7, color = phenotype)) + geom_point(size = 3) + facet_grid( ~ centrality, scales='free_x') +
   labs(color = 'Phenotype') + xlab('tSNE_1') + ylab('tSNE_2')
 
 ## Compute silhouette score for the separation of gene centrality between the two differentiation efficiency group.
@@ -138,7 +140,7 @@ ggplot(df.tsne, aes(X1, X2, color = phenotype)) + geom_point(size = 3) + facet_g
 df.tsne %>% group_by(centrality) %>%
   group_modify(~ {
      data.frame( silhouette_score = 
-      mean(silhouette(as.integer(as.factor(.x$phenotype)), daisy(.x[,1:2]))[,3]))}) %>% 
+      mean(silhouette(as.integer(as.factor(.x$phenotype)), daisy(.x[,1:4]))[,3]))}) %>% 
     kable(format = "html")
 
 ```

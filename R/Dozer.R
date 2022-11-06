@@ -7,11 +7,16 @@
 #' @param lib_size A vector of cell sequencing depth (optional).
 #' @param covs A data frame, whose columns are covariates for cells, e.g. batch labels.
 #' @param multicore A boolean variable indicating whether we want to parallel the computation for the normalization of each gene.
+#' @param min_expressed_cells The minimum number of cells that a gene have positive expression in. The co-expression and noise ratio of genes expressed in less than this number of cells will not be computed and set as NA (missing). 
 #' @return co-expression matrix in the "network" slot and gene noise to signal ratio vector in the "ratio" slot.
 #' @export
-compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE){
-  ## store gene names or id in a vector "genes"
-  genes = rownames(data)
+compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2){
+  ## store gene names
+  all_genes = rownames(data)
+  ## detect sparse genes
+  sparse_gene = rowSums(data > 0) < min_expressed_cells
+  genes = all_genes[!sparse_gene]
+  
   ## If cell sequencing depth is not provided, substitute it with total counts per cell
   if (is.null(lib_size)){
     lib_size = colSums(data)
@@ -20,7 +25,7 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   lib_size = lib_size/median(lib_size)
   
   ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
-  dat_normalize = .normalize_data(data = data, lib_size = lib_size , covs = covs, multicore = multicore)
+  dat_normalize = .normalize_data(data = data[!sparse_gene,], lib_size = lib_size , covs = covs, multicore = multicore)
   
   ## Give higher cells weights to cells of higher sequencing depth, in the computation of gene noise ratio and weighted gene correlation.
   cell_weight = lib_size
@@ -31,24 +36,39 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   ## Re-scale the normalized counts to avoid numerical instability when computing correlations
   dat_normalize$norm_expr = t(apply(dat_normalize$norm_expr, 1, FUN=function(x){x/mean(x)}))
   ## Compute weighted gene correlations.
-  network = cov.wt(t(dat_normalize$norm_expr), wt = cell_weight, cor = TRUE)$cor
+  network_nonsparse_gene = cov.wt(t(dat_normalize$norm_expr), wt = cell_weight, cor = TRUE)$cor
   
   ## Apply gene correction factors 
-  network = sweep(network, MARGIN = 2, scaling$correction_factor, `*`)
-  network = sweep(network, MARGIN = 1, scaling$correction_factor, `*`)
+  network_nonsparse_gene = sweep(network_nonsparse_gene, MARGIN = 2, scaling$correction_factor, `*`)
+  network_nonsparse_gene = sweep(network_nonsparse_gene, MARGIN = 1, scaling$correction_factor, `*`)
   ## Label each row and column of gene correlation matrix with gene id.
-  rownames(network) = genes
-  colnames(network) = genes
+  rownames(network_nonsparse_gene) = genes
+  colnames(network_nonsparse_gene) = genes
   
   ## Set the correlation of a gene to itself to be 1
-  diag(network) = 1
+  diag(network_nonsparse_gene) = 1
   ## Threshold all corrected correlation larger than 1 to be the largest correlation value which is smaller than 1
-  network[network > 1] = max(network[network < 1])
-  ## Label gene noise ratio with gene id.
-  ratio = data.frame(ratio = scaling$noise_ratio)
-  rownames(ratio) = genes
-  ## Return gene co-expression matrix and gene noise ratio.
-  return(list(network = network, ratio = ratio))
+  network_nonsparse_gene[network_nonsparse_gene > 1] = max(network_nonsparse_gene[network_nonsparse_gene < 1])
+  
+  if (sum(sparse_gene)>0){
+    ## If there are sparse genes, set the correlation and noise ratio of these genes as missing (NA).
+    network = matrix(NA, nrow = length(all_genes), ncol = length(all_genes))
+    rownames(network) = all_genes
+    colnames(network) = all_genes
+    network[genes, genes] = network_nonsparse_gene
+    ratio = data.frame(ratio = rep(NA, length(all_genes)))
+    rownames(ratio) = all_genes
+    ratio[genes,'ratio'] = scaling$noise_ratio
+    return(list(network = network, ratio = ratio))
+  }else{
+    ## Label gene noise ratio with gene id.
+    ratio = data.frame(ratio = scaling$noise_ratio)
+    rownames(ratio) = all_genes
+    ## Return gene co-expression matrix and gene noise ratio.
+    return(list(network = network_nonsparse_gene, ratio = ratio))
+  }
+  
+  
 }
 
 #' Compute gene centrality in the hard-threshold gene co-expression network.
@@ -122,7 +142,7 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
   diff_network = diff_network%*%t(diff_network)
   
   ## separate the genes with edges in diff_network (non_singleton) and genes without edges in diff_network (singleton).
-  non_singleton = rowSums(abs(diff_network)) >= 0
+  non_singleton = rowSums(abs(diff_network)) > 0
   sub_net = diff_network[non_singleton, non_singleton]
   ## Convert the adjacency matrix of all non_singletons to a nonnegative distance matrix.
   distance = max(sub_net) - sub_net
