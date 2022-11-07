@@ -12,6 +12,9 @@
 #' @export
 compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2){
   ## store gene names
+  if (is.null(rownames(data))){
+    rownames(data) = paste0('gene_', 1:nrow(data))
+  }
   all_genes = rownames(data)
   ## detect sparse genes
   sparse_gene = rowSums(data > 0) < min_expressed_cells
