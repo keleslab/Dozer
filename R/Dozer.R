@@ -13,7 +13,7 @@
 compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2){
   ## store gene names
   if (is.null(rownames(data))){
-    rownames(data) = paste0('gene_', 1:nrow(data))
+    rownames(data) = paste0('Gene_', 1:nrow(data))
   }
   all_genes = rownames(data)
   ## detect sparse genes
@@ -24,7 +24,7 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   if (is.null(lib_size)){
     lib_size = colSums(data)
   }
-  ## Re-scale lib_size in case it is to avoid numerical instability
+  ## Re-scale lib_size to avoid numerical instability
   lib_size = lib_size/median(lib_size)
   
   ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
@@ -59,13 +59,16 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
     rownames(network) = all_genes
     colnames(network) = all_genes
     network[genes, genes] = network_nonsparse_gene
-    ratio = data.frame(ratio = rep(NA, length(all_genes)))
+    ratio = data.frame(matrix(NA, nrow = length(all_genes), ncol = 2))
+    colnames(ratio) = c('noise_ratio', 'correction_factor')
     rownames(ratio) = all_genes
-    ratio[genes,'ratio'] = scaling$noise_ratio
+    ratio[genes, 1] = scaling$noise_ratio
+    ratio[genes, 2] = scaling$correction_factor
+    
     return(list(network = network, ratio = ratio))
   }else{
     ## Label gene noise ratio with gene id.
-    ratio = data.frame(ratio = scaling$noise_ratio)
+    ratio = data.frame(scaling)
     rownames(ratio) = all_genes
     ## Return gene co-expression matrix and gene noise ratio.
     return(list(network = network_nonsparse_gene, ratio = ratio))
@@ -137,6 +140,11 @@ simulate_counts <- function(corr, shape, scale, mlog, sdlog, ncell){
 #' @return cluster labels
 #' @export
 clustering_difference_network<-function(network1, network2, minClusterSize = 20){
+  if (is.null(rownames(network1))){
+    genes = paste0('Gene_', 1:nrow(network1))
+  }else{
+    genes = rownames(network1)
+  }
   ## Compute the difference of the two adjacency matrices.
   diff_network = network1 - network2
   ## compute inner product of difference network to itself, 
@@ -155,7 +163,7 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
   ## Combine cluster labels for singleton and nonsingletons, labels genes by their id provided in network1.
   final_cluster = rep('singleton', nrow(network1))
   final_cluster[non_singleton] = cluster_non_singleton
-  names(final_cluster) = rownames(network1)
+  names(final_cluster) = genes
   return(final_cluster)
 }
 

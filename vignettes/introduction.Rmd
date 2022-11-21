@@ -75,7 +75,8 @@ noise_ratio_gene_by_donor = foreach (i = 1:nrow(donor_info), .packages = c('Matr
     weighted_total_counts_per_cell = rowMeans(apply(data, 1, FUN=function(x){if   (mean(x)>1){x=x/mean(x)}; return(x)}))
     ## If there are several sample_index presented in the dataset, regress it out.
     res = Dozer::compute_gene_correlation(data,  lib_size = weighted_total_counts_per_cell, 
-                                   covs = data.frame(var1 = as.factor(meta$sample_id)))
+                                   covs = data.frame(batch_id = as.factor(meta$sample_id),
+                                                     n_feature = colSums(data>0)))
     ## Saver co-expression matrices to file
     save(res, file = paste0(path, donor, '-coexpr.rda'))
     res$ratio
@@ -132,7 +133,7 @@ df.tsne = rbind(data.frame(compute_tsne(degree), donor_info, method = 'Dozer', c
                data.frame(compute_tsne(eigenvector), donor_info, method = 'Dozer', centrality = 'eigenvector'))
 
 ## Plot tSNE coordinates of gene centrality with color labels for differentiation efficiency group.
-ggplot(df.tsne, aes(X6, X7, color = phenotype)) + geom_point(size = 3) + facet_grid( ~ centrality, scales='free_x') +
+ggplot(df.tsne, aes(X6, X7, color = phenotype)) + geom_point(size = 3) + facet_wrap( ~ centrality, nrow = 1, scales='free') +
   labs(color = 'Phenotype') + xlab('tSNE_1') + ylab('tSNE_2')
 
 ## Compute silhouette score for the separation of gene centrality between the two differentiation efficiency group.
@@ -228,7 +229,7 @@ theme(legend.position='top')+  guides(color = guide_legend(nrow = 2, byrow = TRU
   labs(color = 'Statistical significance') +scale_color_manual(values = c('grey50', 'steelblue', 'darkred', 'orange'))
 ```
 
-# 4 "Differene network" between phenotypic groups
+# 4 "Difference network" between phenotypic groups
 
 ## 4.1 Detect modules in the "differene network" between Success and Failure group.
 
