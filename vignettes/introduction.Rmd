@@ -70,16 +70,14 @@ noise_ratio_gene_by_donor = foreach (i = 1:nrow(donor_info), .packages = c('Matr
     donor = donor_info$donor_id[i]
     data = matrix(counts[ , metadata$donor_id == donor], nrow = nrow(counts))
     meta = metadata[metadata$donor_id == donor, ]
-    ## Compute a weighted total counts per cell as an approximation for sequencing depth, 
-    ## where we down weight genes with higher expression by dividing the expression by its mean.
-    weighted_total_counts_per_cell = rowMeans(apply(data, 1, FUN=function(x){if   (mean(x)>1){x=x/mean(x)}; return(x)}))
-    ## If there are several sample_index presented in the dataset, regress it out.
-    res = Dozer::compute_gene_correlation(data,  lib_size = weighted_total_counts_per_cell, 
-                                   covs = data.frame(batch_id = as.factor(meta$sample_id),
-                                                     n_feature = colSums(data>0)))
+    
+    ## If there are several sample_index presented in one dataset, regress it out.
+    res = Dozer::compute_gene_correlation(data, 
+                                   covs = data.frame(meta$sample_id), 
+                                   gene_group_quantile = c(.5, .8))
     ## Saver co-expression matrices to file
     save(res, file = paste0(path, donor, '-coexpr.rda'))
-    res$ratio
+    res$ratio[,1]
 }
 stopCluster(cl)
 ```
@@ -93,6 +91,7 @@ keep_gene = rowMeans(noise_ratio_gene_by_donor) < .9
 gene_name = rownames(counts)[keep_gene]
 ## The number of genes passed filtering with noise ratio.
 sum(keep_gene)
+
 ```
 
 # 3 Gene centrality analysis
@@ -119,8 +118,9 @@ eigenvector = centrality[, seq(4, ncol(centrality), 4)]
 ## A function conducting tSNE dimension reduction for centrality matrices.
 compute_tsne <- function(dat){
   set.seed(1)
-  pr <- prcomp(log(1+apply(dat,2,rank)), scale = T, center = T)
-  tsne = Rtsne::Rtsne(pr$rotation[, 1:4], perplexity = 15)
+  dat = log1p(dat)
+  pr <- prcomp(dat, scale = T, center = T)
+  tsne = Rtsne::Rtsne(pr$rotation[, 1:3], perplexity = 20)
   res = data.frame(pr$rotation[, 1:5], tsne$Y)
   colnames(res) = paste0('X', 1:ncol(res))
   return(res)
@@ -131,6 +131,8 @@ df.tsne = rbind(data.frame(compute_tsne(degree), donor_info, method = 'Dozer', c
                data.frame(compute_tsne(pagerank), donor_info, method = 'Dozer', centrality = 'pagerank'),
                data.frame(compute_tsne(betweenness), donor_info, method = 'Dozer', centrality = 'betweenness'),
                data.frame(compute_tsne(eigenvector), donor_info, method = 'Dozer', centrality = 'eigenvector'))
+print(apply(df.tsne[1:nrow(donor_info), 1:5], 2, FUN=function(x){cor(x, donor_info$diff_efficiency)}))
+
 
 ## Plot tSNE coordinates of gene centrality with color labels for differentiation efficiency group.
 ggplot(df.tsne, aes(X6, X7, color = phenotype)) + geom_point(size = 3) + facet_wrap( ~ centrality, nrow = 1, scales='free') +
@@ -141,7 +143,7 @@ ggplot(df.tsne, aes(X6, X7, color = phenotype)) + geom_point(size = 3) + facet_w
 df.tsne %>% group_by(centrality) %>%
   group_modify(~ {
      data.frame( silhouette_score = 
-      mean(silhouette(as.integer(as.factor(.x$phenotype)), daisy(.x[,1:4]))[,3]))}) %>% 
+      mean(silhouette(as.integer(as.factor(.x$phenotype)), daisy(.x[,1:3]))[,3]))}) %>% 
     kable(format = "html")
 
 ```
@@ -152,7 +154,7 @@ df.tsne %>% group_by(centrality) %>%
 centrality_label = colnames(centrality)[1:4]
 DC.list = list()
 for (j in 1:4){
-  df.centrality = centrality[, seq(j, ncol(centrality), 4)]
+  df.centrality = log1p(centrality[, seq(j, ncol(centrality), 4)])
   group = donor_info[, 'phenotype']
   design2 <- model.matrix( ~ group - 1)
   colnames(design2) <- c("Success", "Failure")
@@ -181,15 +183,17 @@ nterm = 15
 # database
 dbs <- "KEGG_2021_Human"
 
-gene_set = rownames(DC_test%>% filter(centrality == mode, adj.P.Val < .05))
+gene_set = rownames(DC_test%>% filter(centrality == mode & adj.P.Val < .05))
 
-enriched <- enrichr(databases = dbs, genes = as.character(gene_set))
-
-enriched[[1]][1:nterm,] %>%mutate(Term = factor(Term, levels = Term[seq(nterm,1)]), 
-  overlap_gene_count = unlist(lapply(Overlap, FUN=function(x){as.integer(strsplit(x, '/')[[1]][1])}))) %>% 
-  ggplot(aes(Term, -log10(Adjusted.P.value), fill = overlap_gene_count))+geom_bar(stat = 'identity')+
-  scale_fill_gradient(low='blue', high = 'red')+coord_flip()+labs(fill = 'Overlapping gene counts')+
-  ylab('-log10 adjusted p value') + ggtitle(paste0('Gene set enrichment for differential ', mode, ' genes'))
+if (length(gene_set)>0){
+  enriched <- enrichr(databases = dbs, genes = as.character(gene_set))
+  nterm = min(nterm, nrow(enriched[[1]]))
+  enriched[[1]][1:nterm,] %>%mutate(Term = factor(Term, levels = Term[seq(nterm,1)]), 
+    overlap_gene_count = unlist(lapply(Overlap, FUN=function(x){as.integer(strsplit(x, '/')[[1]][1])}))) %>% 
+    ggplot(aes(Term, -log10(Adjusted.P.value), fill = overlap_gene_count))+geom_bar(stat = 'identity')+
+    scale_fill_gradient(low='blue', high = 'red')+coord_flip()+labs(fill = 'Overlapping gene counts')+
+    ylab('-log10 adjusted p value') + ggtitle(paste0('Gene set enrichment for differential ', mode, ' genes'))
+}
 
 ```
 
@@ -312,6 +316,22 @@ df.kegg %>%
   scale_fill_gradient(low='blue', high = 'red', trans='log10')+coord_flip()+labs(fill = 'Overlapping gene counts')+
   ylab('-log10 adjusted p value') +facet_grid(~cluster, scales='free')+theme(legend.position = 'top')
   
+```
+
+# 5 Diagnostic plot for the adequacy of a global cell size estimation for the normalization of all genes.
+If expression of each individual  gene grows proportionally with trimmed total UMI counts, using one cell size estimation for the normalization of all genes is adequate, otherwise, estimating cell size separately for each gene is preferable. 
+We displayed the slope of linear regression $\frac{Y_j}{\bar{Y}_j} \sim \frac{l}{\bar{l}}$ where $Y_j, l$ represent raw counts of gene $j$ and trimmed total UMI counts, and $\bar{Y}_j, \bar{l}$ represent their mean. If gene expression grows proportionally with trimmed total UMI counts, regression slopes for all genes will be centered around one. 
+
+```{r, fig.width=5, fig.height=5}
+# Use data from one donor as an example
+donor = donor_info$donor_id[2]
+data = counts[, metadata$donor_id %in% donor]
+normalize_with_global_cell_size = Dozer::diagnoistic_plot_cell_size(data, n=20)
+nromalize_with_gene_specific_cell_size = Dozer::diagnoistic_plot_cell_size(data, n=20, gene_group_quantile = c(.5, .8))
+
+normalize_with_global_cell_size[[1]]
+normalize_with_global_cell_size[[2]] + ggtitle('Normalize with global cell size')
+nromalize_with_gene_specific_cell_size[[2]] + ggtitle('Normalize with gene specifc cell size')
 ```
 ```{r}
 # delete the folder storing co-expression matrices

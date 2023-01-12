@@ -4,14 +4,27 @@
 \alias{compute_gene_correlation}
 \title{Compute gene-gene correlation matrix}
 \usage{
-compute_gene_correlation(data, lib_size = NULL, covs = NULL)
+compute_gene_correlation(
+  data,
+  lib_size = NULL,
+  covs = NULL,
+  multicore = FALSE,
+  min_expressed_cells = 2,
+  gene_group_quantile = NULL
+)
 }
 \arguments{
 \item{data}{A gene expression matrix, with rows representing genes and columns representing cells.}
 
 \item{lib_size}{A vector of cell sequencing depth (optional).}
 
-\item{covs}{A data frame or a list of other covariates for cells, e.g. batch labels.}
+\item{covs}{A data frame, whose columns are covariates for cells, e.g. batch labels.}
+
+\item{multicore}{A boolean variable indicating whether we want to parallel the computation for the normalization of each gene.}
+
+\item{min_expressed_cells}{The minimum number of cells that a gene have positive expression in. The co-expression and noise ratio of genes expressed in less than this number of cells will not be computed and set as NA (missing).}
+
+\item{gene_group_quantile}{A vector of quantile values (ranging from 0 to 1) on gene average expression, to divide genes into groups for the estimation of cell size specifically of each gene.}
 }
 \value{
 co-expression matrix in the "network" slot and gene noise to signal ratio vector in the "ratio" slot.

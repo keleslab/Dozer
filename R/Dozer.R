@@ -7,14 +7,24 @@
 #' @param lib_size A vector of cell sequencing depth (optional).
 #' @param covs A data frame, whose columns are covariates for cells, e.g. batch labels.
 #' @param multicore A boolean variable indicating whether we want to parallel the computation for the normalization of each gene.
-#' @param min_expressed_cells The minimum number of cells that a gene have positive expression in. The co-expression and noise ratio of genes expressed in less than this number of cells will not be computed and set as NA (missing). 
+#' @param min_expressed_cells The minimum number of cells that a gene have positive expression in. The co-expression and noise ratio of genes expressed in less than this number of cells will not be computed and set as NA (missing).
+#' @param gene_group_quantile A vector of quantile values (ranging from 0 to 1) on gene average expression, to divide genes into groups for the estimation of cell size specifically of each gene.
 #' @return co-expression matrix in the "network" slot and gene noise to signal ratio vector in the "ratio" slot.
 #' @export
-compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2){
+compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2, 
+                                     gene_group_quantile = NULL){
+  # convert sparse matrix to dense matrix
+  if (inherits(data,'Matrix')){
+    data = matrix(data, nrow = nrow(data))
+  }
   ## store gene names
   if (is.null(rownames(data))){
     rownames(data) = paste0('Gene_', 1:nrow(data))
   }
+  
+  ## Give higher cells weights to cells of higher sequencing depth, in the computation of gene noise ratio and weighted gene correlation.
+  cell_weight = colSums(data)/median(colSums(data))  
+  
   all_genes = rownames(data)
   ## detect sparse genes
   sparse_gene = rowSums(data > 0) < min_expressed_cells
@@ -22,16 +32,17 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   
   ## If cell sequencing depth is not provided, substitute it with total counts per cell
   if (is.null(lib_size)){
-    lib_size = colSums(data)
+    lib_size = trimmed_total_counts(data)
   }
   ## Re-scale lib_size to avoid numerical instability
   lib_size = lib_size/median(lib_size)
   
+  if (!is.null(gene_group_quantile)){
+    covs = cbind(covs, .compute_tUMI_for_gene_bins(data[!sparse_gene, ], gene_group_quantile))
+    lib_size = rep(1, ncol(data))
+  }
   ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
   dat_normalize = .normalize_data(data = data[!sparse_gene,], lib_size = lib_size , covs = covs, multicore = multicore)
-  
-  ## Give higher cells weights to cells of higher sequencing depth, in the computation of gene noise ratio and weighted gene correlation.
-  cell_weight = lib_size
   
   ## Compute gene noise ration and gene correction factor using internal function ".noise_ratio_correction"
   scaling = .noise_ratio_correction(dat_normalize$norm_expr, dat_normalize$expr_var, cell_weight)
@@ -167,10 +178,128 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
   return(final_cluster)
 }
 
+#' Compute trimmed total counts
+#'
+#' @param data counts matrix
+#' @param max_weight genes with weights higher than max_weight will be trimmed 
+#' @param delta A threshold on the minimum total counts over median total counts, in order not to have extremely small trimmed total counts, which aims to stablize normalized counts.
+#' @return trimmed total counts per cell
+#' @export
+trimmed_total_counts <- function(data, max_weight = 1/300, delta = NULL){
+  if (inherits(data,'Matrix')){
+    data = matrix(data, nrow = nrow(data))
+  }
+  if(is.null(delta)){
+    # raw total counts
+    raw = colSums(data)
+    # set a default value for delta
+    delta = max(min(raw)/median(raw)/10, 1e-2)  
+  }
+  # Do not use extra sparse genes (less than 10 positive counts) in the calculation of trimmed UMI counts.
+  non_sparse = rowSums(data > 0) > 10
+  if (sum(non_sparse)<50){warning('Majority of genes are overly sparse or not enough genes provided in the dataset.')}
+  data = data[non_sparse, ]
+  
+  N = nrow(data)
+  max_weight = max(max_weight, 1/N)
+  
+  # Find the cutoff value for trimmed UMI through bisection
+  weight = rowSums(data)
+  weight = weight/sum(weight)
+  if (max_weight==1/N){
+    weight = rep(1/N, N)
+  }else if(max(weight)> max_weight){
+    s0=sort(weight)
+    l = 1
+    r = N
+    while (l<r){
+      s = s0
+      m = floor(l/2+r/2)
+      s[m:N]=s[m]
+      M = max(s)/sum(s)
+      if (M<max_weight){
+        l = m + 1
+      }else if(M==max_weight){
+        l = m
+        break
+      }else{
+        r = m - 1
+      }
+    } 
+    weight[weight>=s0[l]] = s0[l]
+    weight = weight/sum(weight)
+  }
+  
+  # compute total UMI counts with gene weights specified by "weight"
+  ans = rep(0, ncol(data))
+  for (i in 1:nrow(data)){
+    ans = ans+weight[i]*data[i,]/mean(data[i,])
+  }
+  ans = ans/median(ans)
+  ans[ans<delta] = delta
+  return(ans)
+}
+
+#' Generate a figure showing the slope of gene counts over trimmed total UMI counts.
+#' If all gene slopes are centered around 1, using trimmed total UMI counts as adjustment for cell size is adequate.
+#' @param data counts matrix
+#' @param n number of bins for genes 
+#' @return density plot of linear regression slopes of gene expression over trimmed total UMI counts.
+#' @export
+diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_quantile = NULL, n = 10){
+  if (inherits(data,'Matrix')){
+    data = matrix(data, nrow = nrow(data))
+  }
+  mean_expr = rowMeans(data)
+  data_scale_row = t(apply(data, 1, FUN=function(x){x/mean(x)}))
+  tUMI = trimmed_total_counts(data)
+  tUMI = tUMI/mean(tUMI)
+  df_raw = data.frame(expr = mean_expr, 
+                      slope = apply(data_scale_row, 1, FUN=function(x){lm(x~tUMI-1)$coef[1]}), 
+                      data = 'Raw counts')
+  df_raw$expr_bins = cut_number(df_raw$expr, n=n)
+  p1 = ggplot2::ggplot(df_raw, aes(slope, color= expr_bins))+ggplot2::scale_color_viridis_d()+
+    ggplot2::geom_density(size=2) + ggplot2::geom_vline(xintercept = 1) + theme_bw(base_size = 10)+
+    xlab('Slope of Raw counts\non trimmed total UMI counts')+labs(color = 'Gene bins\nby expression')
+  
+  if (is.null(normalized_data)){
+    if (is.null(gene_group_quantile)){
+      normalized_data = .normalize_data(data, tUMI)$norm_expr
+    }else{
+      covs = .compute_tUMI_for_gene_bins(data, gene_group_quantile)
+      normalized_data = .normalize_data(data, lib_size = rep(1, ncol(data)), covs = covs)$norm_expr
+    }
+  }
+  
+  #normalized_data = t(apply(normalized_data, 1, FUN=function(x){x/mean(x)}))
+  df_norm = data.frame(expr = rowMeans(data), 
+                       cor = apply(normalized_data, 1, FUN=function(x){cor(x,tUMI)}), 
+                       data = 'Normalized data')
+  df_norm$expr_bins = cut_number(df_norm$expr, n=n)
+  p2 = ggplot2::ggplot(df_norm, aes(cor, color= expr_bins))+ggplot2::scale_color_viridis_d()+
+    ggplot2::geom_density(size=2) + ggplot2::geom_vline(xintercept = 0) + theme_bw(base_size = 10)+
+    xlab('Correlation of normalized genes\nwith trimmed total UMI counts')+labs(color =  'Gene bins\nby expression')+
+    xlim(-1,1)
+  
+  return(list(raw_data = p1, normalized_data = p2))
+}
+
 
 
 ## internal functions ##
-.normalize_data <- function(data, lib_size, covs = NULL, multicore){
+.compute_tUMI_for_gene_bins <- function(data, gene_group_quantile){
+  # generate a data frame, whose columns are log of trimmed total UMI counts for genes in bins set by expression quantiles from "gene_group_quantile".
+  nbins = length(gene_group_quantile)+1
+  covs = data.frame(matrix(0, nrow = ncol(data), ncol = nbins))
+  mean_expr = rowMeans(data)
+  q = c(0, unlist(lapply(gene_group_quantile, FUN=function(x){quantile(mean_expr, x)})), max(mean_expr))
+  for(i in 1:nbins){
+    covs[,i] = log(trimmed_total_counts(data[mean_expr > q[i]& mean_expr <= q[i+1],]))
+  }
+  return(covs)
+}
+
+.normalize_data <- function(data, lib_size, covs = NULL, multicore = FALSE, delta = NULL){
   # a function that uses poisson regression to normalize count matrix of scRNA-seq data 
   # input: data (count matrix, gene by cell), lib_size (a vector of cell sequencing depth), covs (other sources of variation to be adjusted)
   # output a list containing norm_expr (normalized matrix) and expr_var (variance of the normalized count)
@@ -178,6 +307,11 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
   ## shape of data is # genes by # cells.
   ncell = ncol(data)
   ngene = nrow(data)
+  if (is.null(delta)){
+    total_counts = colSums(data)
+    delta = max(min(total_counts)/median(total_counts), 0.01)
+  }
+  
   
   ## remove covariates with identical values for all cells
   if (!is.null(covs)){
@@ -187,6 +321,8 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
   if (length(covs)==0){
     ## When the number of covariate is zero, scale raw counts by cell lib_size, 
     ## the variance of the normalized count is count/lib_size^2.
+    lib_size = lib_size/median(lib_size)
+    lib_size[lib_size<delta] = delta
     norm_expr = sweep(data, MARGIN = 2, 1/lib_size, `*`)
     expr_var = sweep(data, MARGIN = 2, 1/lib_size^2, `*`)
     return(list(norm_expr = norm_expr, expr_var = expr_var))
@@ -200,6 +336,8 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
       fit1 = stats::glm(y  ~ .-n, offset=(log(n)),
                         family=poisson(link = log), data = obs)
       lhat = stats::predict(fit1, type='response')
+      lhat = lhat/median(lhat)
+      lhat[lhat<delta] = delta
       expr_var[i,] = obs$y/lhat^2
       norm_expr[i,] = obs$y/lhat
     } 
@@ -213,8 +351,11 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
     res = foreach::foreach(i = 1:ngene, .combine = 'rbind')%dopar%{
       obs = data.frame(y = data[i,], n = lib_size, covs)
       fit1 = stats::glm(y  ~ .-n, offset=(log(n)),
-                 family=poisson(link = log), data = obs)
+                        family=poisson(link = log), data = obs)
       lhat = stats::predict(fit1, type='response')
+      lhat = lhat/median(lhat)
+      lhat[lhat<delta] = delta
+      
       norm_expr_i = obs$y/lhat
       expr_var_i = obs$y/lhat^2
       c(norm_expr_i, expr_var_i)
@@ -223,6 +364,7 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
     return(list(norm_expr = res[,1:ncell], expr_var = res[,(ncell+1):(ncell*2)]))
   }
 }
+
 
 
 .noise_ratio_correction <- function(norm_expr, expr_var, cell_weight){
