@@ -257,7 +257,7 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   df_raw = data.frame(expr = mean_expr, 
                       slope = apply(data_scale_row, 1, FUN=function(x){lm(x~tUMI-1)$coef[1]}), 
                       data = 'Raw counts')
-  df_raw$expr_bins = cut_number(df_raw$expr, n=n)
+  df_raw$expr_bins = ggplot2::cut_number(df_raw$expr, n=n)
   p1 = ggplot2::ggplot(df_raw, aes(slope, color= expr_bins))+ggplot2::scale_color_viridis_d()+
     ggplot2::geom_density(size=2) + ggplot2::geom_vline(xintercept = 1) + theme_bw(base_size = 10)+
     xlab('Slope of Raw counts\non trimmed total UMI counts')+labs(color = 'Gene bins\nby expression')
@@ -275,7 +275,7 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   df_norm = data.frame(expr = rowMeans(data), 
                        cor = apply(normalized_data, 1, FUN=function(x){cor(x,tUMI)}), 
                        data = 'Normalized data')
-  df_norm$expr_bins = cut_number(df_norm$expr, n=n)
+  df_norm$expr_bins = ggplot2::cut_number(df_norm$expr, n=n)
   p2 = ggplot2::ggplot(df_norm, aes(cor, color= expr_bins))+ggplot2::scale_color_viridis_d()+
     ggplot2::geom_density(size=2) + ggplot2::geom_vline(xintercept = 0) + theme_bw(base_size = 10)+
     xlab('Correlation of normalized genes\nwith trimmed total UMI counts')+labs(color =  'Gene bins\nby expression')+
