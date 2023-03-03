@@ -15,7 +15,7 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
                                      gene_group_quantile = NULL){
   # convert sparse matrix to dense matrix
   if (inherits(data,'Matrix')){
-    data = matrix(data, nrow = nrow(data))
+    data = matrix(data, nrow = nrow(data), dimnames = list(rownames(data), colnames(data)))
   }
   ## store gene names
   if (is.null(rownames(data))){
@@ -38,7 +38,11 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   lib_size = lib_size/median(lib_size)
   
   if (!is.null(gene_group_quantile)){
-    covs = cbind(covs, .compute_tUMI_for_gene_bins(data[!sparse_gene, ], gene_group_quantile))
+    if (is.null(covs)){
+      covs = .compute_tUMI_for_gene_bins(data[!sparse_gene, ], gene_group_quantile)
+    }else{
+      covs = cbind(covs, .compute_tUMI_for_gene_bins(data[!sparse_gene, ], gene_group_quantile))
+    }
     lib_size = rep(1, ncol(data))
   }
   ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
