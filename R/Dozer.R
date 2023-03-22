@@ -409,7 +409,7 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   
   final_S = predict(S_smooth, noise_ratio) #pmin(turn_val, 1/(1-noise_ratio))
   final_S[noise_ratio >= turn_arg] = turn_val
-  
+  final_S = pmax(1, final_S)
   
   ## we are using sqrt(final_S) as the correction_factor here, but we refer to final_S as the correction factor in the paper.
   return(list(noise_ratio = noise_ratio, correction_factor = sqrt(final_S)))
