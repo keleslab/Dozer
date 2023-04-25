@@ -189,7 +189,7 @@ clustering_difference_network<-function(network1, network2, minClusterSize = 20)
 #' @param delta A threshold on the minimum total counts over median total counts, in order not to have extremely small trimmed total counts, which aims to stablize normalized counts.
 #' @return trimmed total counts per cell
 #' @export
-trimmed_total_counts <- function(data, max_weight = 1/300, delta = NULL){
+trimmed_total_counts <- function(data, max_weight = 1/50, delta = NULL){
   if (inherits(data,'Matrix')){
     data = matrix(data, nrow = nrow(data))
   }
