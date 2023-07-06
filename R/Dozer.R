@@ -9,12 +9,13 @@
 #' @param multicore A boolean variable indicating whether we want to parallel the computation for the normalization of each gene.
 #' @param min_expressed_cells The minimum number of cells that a gene have positive expression in. The co-expression and noise ratio of genes expressed in less than this number of cells will not be computed and set as NA (missing).
 #' @param gene_group_quantile A vector of quantile values (ranging from 0 to 1) on gene average expression, to divide genes into groups for the estimation of cell size specifically of each gene.
+#' @param lib_size_option This parameter takes one of the three values "global", "gene_specific" or "adaptive". "global" means using a global cell size factor for normalization, either specified in parameter "lib_size" or calculated by trimmed total UMI counts. The "gene_specific" option uses trimmed UMIs in gene groups associated with "gene_group_quantile" for normalization. The "adaptive" option first normalizes with a global cell size, test its adequacy and switch to gene specific cell size factor if adequacy conditions are not satisfied. 
 #' @return co-expression matrix in the "network" slot and gene noise to signal ratio vector in the "ratio" slot.
 #' @export
 compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multicore = FALSE, min_expressed_cells = 2, 
-                                     gene_group_quantile = NULL){
+                                     gene_group_quantile = NULL, lib_size_option = 'adaptive'){
   # convert sparse matrix to dense matrix
-  if (inherits(data,'Matrix')){
+  if (inherits(data, 'Matrix')){
     data = matrix(data, nrow = nrow(data), dimnames = list(rownames(data), colnames(data)))
   }
   ## store gene names
@@ -37,7 +38,8 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
   ## Re-scale lib_size to avoid numerical instability
   lib_size = lib_size/median(lib_size)
   
-  if (!is.null(gene_group_quantile)){
+  # add trimmed UMIs in gene groups to regression covariates, if we choose to use "gene specific" normalization. Then change lib_size_option to "global".
+  if (!is.null(gene_group_quantile) & lib_size_option == 'gene_specific'){
     if (is.null(covs)){
       covs = .compute_tUMI_for_gene_bins(data[!sparse_gene, ], gene_group_quantile)
     }else{
@@ -45,10 +47,13 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
     }
     lib_size = rep(1, ncol(data))
   }
+  if (lib_size_option != 'adaptive'){
+    lib_size_option = 'global'
+  }
   ## Normalize raw counts and compute gene noise ratio using internal function ".normalize_data"
-  dat_normalize = .normalize_data(data = data[!sparse_gene,], lib_size = lib_size , covs = covs, multicore = multicore)
+  dat_normalize = .normalize_data(data = data[!sparse_gene,], lib_size = lib_size , covs = covs, multicore = multicore, lib_size_option =  lib_size_option)
   
-  ## Compute gene noise ration and gene correction factor using internal function ".noise_ratio_correction"
+  ## Compute gene noise ratio and gene correction factor using internal function ".noise_ratio_correction"
   scaling = .noise_ratio_correction(dat_normalize$norm_expr, dat_normalize$expr_var, cell_weight)
   
   ## Re-scale the normalized counts to avoid numerical instability when computing correlations
@@ -88,8 +93,6 @@ compute_gene_correlation <- function(data, lib_size = NULL, covs = NULL, multico
     ## Return gene co-expression matrix and gene noise ratio.
     return(list(network = network_nonsparse_gene, ratio = ratio))
   }
-  
-  
 }
 
 #' Compute gene centrality in the hard-threshold gene co-expression network.
@@ -250,7 +253,7 @@ trimmed_total_counts <- function(data, max_weight = 1/50, delta = NULL){
 #' @param n number of bins for genes 
 #' @return density plot of linear regression slopes of gene expression over trimmed total UMI counts.
 #' @export
-diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_quantile = NULL, n = 10){
+diagnostic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_quantile = NULL, n = 10){
   if (inherits(data,'Matrix')){
     data = matrix(data, nrow = nrow(data))
   }
@@ -303,12 +306,15 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   return(covs)
 }
 
-.normalize_data <- function(data, lib_size, covs = NULL, multicore = FALSE, delta = NULL){
+.normalize_data <- function(data, lib_size, covs = NULL, multicore = FALSE, delta = NULL, lib_size_option = 'global'){
   # a function that uses poisson regression to normalize count matrix of scRNA-seq data 
-  # input: data (count matrix, gene by cell), lib_size (a vector of cell sequencing depth), covs (other sources of variation to be adjusted)
+  # input: data (count matrix, gene by cell), lib_size (a vector of cell sequencing depth), 
+  # covs (other sources of variation to be adjusted)
+  # options = 'global' or 'adaptive'
   # output a list containing norm_expr (normalized matrix) and expr_var (variance of the normalized count)
   
   ## shape of data is # genes by # cells.
+  
   ncell = ncol(data)
   ngene = nrow(data)
   if (is.null(delta)){
@@ -319,10 +325,11 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   
   ## remove covariates with identical values for all cells
   if (!is.null(covs)){
+    covs = as.data.frame(covs)
     covs = covs[, apply(covs, 2, FUN=function(i){length(unique(i))})!=1]
   }
   ## The number of covariate is zero, scale raw counts by cell lib_size, otherwise run a Poisson regression to determine cell specific size factor
-  if (length(covs)==0){
+  if (length(covs)==0 & lib_size_option == 'global'){
     ## When the number of covariate is zero, scale raw counts by cell lib_size, 
     ## the variance of the normalized count is count/lib_size^2.
     lib_size = lib_size/median(lib_size)
@@ -330,7 +337,7 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
     norm_expr = sweep(data, MARGIN = 2, 1/lib_size, `*`)
     expr_var = sweep(data, MARGIN = 2, 1/lib_size^2, `*`)
     return(list(norm_expr = norm_expr, expr_var = expr_var))
-  }else if (!multicore){
+  }else if (lib_size_option == 'global' & (!multicore)){
     ## If there are covariates and we decide not to parallelize the computation for each gene,
     ## we run a Poisson regression for each gene in a loop and compute the response prediction as cell size factor for normalization.
     norm_expr = matrix(0, nrow = ngene, ncol = ncell)
@@ -346,7 +353,7 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
       norm_expr[i,] = obs$y/lhat
     } 
     return(list(norm_expr = norm_expr, expr_var = expr_var))
-  }else{
+  }else if (lib_size_option == 'global' & multicore){
     ## The same computation as the previous block with parallelization for each gene.
     cores = parallel::detectCores()
     cl <- parallel::makeCluster(cores[1]-1) 
@@ -366,9 +373,10 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
     }
     parallel::stopCluster(cl)
     return(list(norm_expr = res[,1:ncell], expr_var = res[,(ncell+1):(ncell*2)]))
+  }else if(lib_size_option == 'adaptive'){
+    return(.gene_specific_normalization(data = data, global_cell_size = lib_size, covs = covs, multicore = multicore))
   }
 }
-
 
 
 .noise_ratio_correction <- function(norm_expr, expr_var, cell_weight){
@@ -413,6 +421,103 @@ diagnoistic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_
   
   ## we are using sqrt(final_S) as the correction_factor here, but we refer to final_S as the correction factor in the paper.
   return(list(noise_ratio = noise_ratio, correction_factor = sqrt(final_S)))
+}
+
+
+##################### new feature ##########################################################
+
+.correlation_density_mode <- function(data, normalized_data = NULL, 
+                                      gene_group_quantile = NULL, lib_size = NULL, tol = 0.1){
+  ## The function partition genes in to "n" bins by its expression level. Then compute the mode of the {correlations(lib_size, normalized gene i)}_{gene i in bin} for each bin. Then count the number of bins with abs(mode) > tol.
+  # data: counts matrix.
+  # normalized_data: normalized gene counts.
+  # gene_group_quantile: variable for Dozer normalization.
+  # lib_size: library size
+  # tol: tolerance value indicating a correlation mode is significantly deviating from zero.
+  if (inherits(data, "Matrix")) {
+    data = matrix(data, nrow = nrow(data))
+  }
+  # remove rows with identical gene counts.
+  NoneID = apply(data, 1, sd)>0
+  data = data[NoneID,]
+  
+  
+  if (is.null(lib_size)){
+    lib_size = trimmed_total_counts(data)
+  }
+  
+  if (is.null(normalized_data)) {
+    if (is.null(gene_group_quantile)) {
+      normalized_data = .normalize_data(data, lib_size)$norm_expr
+    }
+    else {
+      covs = .compute_tUMI_for_gene_bins(data, gene_group_quantile)
+      normalized_data = .normalize_data(data, lib_size = rep(1, ncol(data)), covs = covs)$norm_expr
+    }
+  }else{
+    normalized_data = normalized_data[NoneID, ]
+  }
+  
+  # n: number of gene bins, modes of correlations between lib_size and normalized genes are calculated for genes in each bin.
+  n = min(10, round(nrow(data)/150))  
+  
+  df_norm = data.frame(expr = rowMeans(data), cor = apply(normalized_data, 
+                                                          1, FUN = function(x) {
+                                                            cor(x, lib_size)
+                                                          }), data = "Normalized data")
+  df_norm$expr_bins = ggplot2::cut_number(df_norm$expr, n = n)
+  
+  mode<-function(vec){x = density(vec); x$x[which.max(x$y)]}
+  vol = 0
+  for (i in unique(df_norm$expr_bins)){
+    cors = df_norm$cor[df_norm$expr_bins == i]
+    if (mode(cors)>tol){
+      vol = vol+1
+    }
+  }
+  return(vol)
+  # return the number of gene bins having correlation mode deviating from zero.
+}
+
+.gene_specific_normalization <-function(data, global_cell_size = NULL, covs = NULL, multicore = FALSE){
+  ## The function does normalization for gene counts adaptively. It uses a glocal cell size factor for normalization initially.
+  ## If it is not sufficient, it normalizes with gene specific cell sizes calculated with trimmed UMIs in gene bins. The number of gene bins gradually increases from 2 to 6.
+  # data: counts matrix.
+  # global_cell_size: a sequencing depth estimator. Uses trimmed UMI counts as default.
+  # covs: covariates to regress out during normalization.
+  # multicore: TURE/FALSE -- whether or not use parallel processing in the normalization step.
+
+  # use trimmed UMI as global cell size, if not provided 
+  if (is.null(global_cell_size)){
+    global_cell_size = trimmed_total_counts(data)
+  }
+  # quantile_list is a list of 6 elements, NULL --> use global cell size to normalize. vectors of 1-5 elements specifying quantile thresholds for gene bins for function "compute_tUMI_for_gene_bins"
+  quantile_list = list()
+  quantile_list[[1]] = NULL
+  for (i in 1:5){
+    quantile_list[[i+1]] = 1:i/(i+1)
+  }
+  
+  # normalization 
+  for (q in quantile_list){
+    if (!is.null(q)){
+      covs0 = .compute_tUMI_for_gene_bins(data, q)
+      if (is.null(covs)){
+        covs = covs0
+      }else{
+        covs = cbind(covs, covs0) 
+      }
+      normalization = .normalize_data(data, lib_size = rep(1,ncol(data)), covs = covs, multicore = multicore, lib_size_option = 'global')
+    }else{
+      normalization = .normalize_data(data, lib_size = global_cell_size, covs = covs, multicore = multicore, lib_size_option = 'global')
+    }
+    violation = .correlation_density_mode(data, normalized_data = normalization$norm_expr)
+    # check sufficiency
+    if (violation == 0){
+      break
+    }
+  }
+  return(normalization)
 }
 
 

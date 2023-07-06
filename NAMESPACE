@@ -3,6 +3,6 @@
 export(clustering_difference_network)
 export(compute_centrality)
 export(compute_gene_correlation)
-export(diagnoistic_plot_cell_size)
+export(diagnostic_plot_cell_size)
 export(simulate_counts)
 export(trimmed_total_counts)
