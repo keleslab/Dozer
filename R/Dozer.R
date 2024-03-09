@@ -465,7 +465,17 @@ diagnostic_plot_cell_size <- function(data, normalized_data = NULL, gene_group_q
                                                           1, FUN = function(x) {
                                                             cor(x, lib_size)
                                                           }), data = "Normalized data")
-  df_norm$expr_bins = ggplot2::cut_number(df_norm$expr, n = n)
+  # ======== Updated 20240309 ============
+  # try n=10, if error, use n=5, which works for most cases
+  df_norm$expr_bins <- tryCatch({
+    temp_bins = ggplot2::cut_number(df_norm$expr, n = n)
+    temp_bins
+  }, error = function(e) {
+    n = 5
+    temp_bins = ggplot2::cut_number(df_norm$expr, n = n)
+    temp_bins
+  })
+  # ======================================
   
   mode<-function(vec){x = density(vec); x$x[which.max(x$y)]}
   vol = 0
